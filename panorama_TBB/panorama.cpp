@@ -8,6 +8,7 @@
 #include <thread>
 
 // CImg library
+#define cimg_use_png
 #include "CImg/CImg.h"
 using namespace cimg_library;
 
@@ -105,7 +106,7 @@ int main (int argc, char *argv[]) {
     
     printf("Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count());
 
-   /* std::thread threads[6];
+    std::thread threads[6];
     // Write output images
     for (int i=0; i<6; ++i){
         threads[i] = std::thread([&]() {
@@ -115,11 +116,11 @@ int main (int argc, char *argv[]) {
     }
     for (int i = 0; i < 6; i++) {
         threads[i].join();
-    }*/
-    for (int i = 0; i < 6; i++) {
+    }
+    /*for (int i = 0; i < 6; i++) {
 	std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
 	imgOut[i]->save_png(fname.c_str());
-    }
+    }*/
     printf("Total time: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count());
     std::cout << "  convertation finished successfully\n";
     return 0;
