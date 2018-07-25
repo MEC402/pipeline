@@ -4,16 +4,9 @@
 #include <string>
 #include <unistd.h>
 
-#include <chrono>
-#include <thread>
-
 // CImg library
-#define cimg_use_png
-#include "CImg/CImg.h"
+#include "CImg.h"
 using namespace cimg_library;
-
-//#include <xmmintrin.h>
-//#include <pmmintrin.h>
 
 // Multithreading
 #include <tbb/parallel_for.h>
@@ -25,9 +18,40 @@ int iflag, oflag, hflag, rflag;
 char *ivalue, *ovalue;
 int rvalue=4096;
 
-/**
- **	Parse input parameters
- **/
+struct PixelRange{ int start, end;};
+
+// Overload for nesting Interpolate calls
+inline unsigned char LinearInterpolate(float weight, unsigned char v1, unsigned char v2)
+{
+	return (unsigned char)(weight*v2 + (1.0f - weight) * v1);
+}
+
+// Expectes 1 weight and 2 values
+inline unsigned char LinearInterpolate(float weight, unsigned char *values)
+{
+	return (unsigned char)(weight * (values[1]) + (1.0f - weight)*values[0]);
+}
+
+// Expects 2 weights and 4 values
+inline unsigned char BilinearInterpolate(float *weight, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		LinearInterpolate(weight[1], &values[0]),
+		LinearInterpolate(weight[1], &values[2])
+	};
+	return LinearInterpolate(weight[0], prime);
+}
+
+// Expects 3 weights and 8 values
+inline unsigned char TrilinearInterpolate(float *weight, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		BilinearInterpolate(&(weight[0]), &(values[0])),
+		BilinearInterpolate(&(weight[1]), &(values[4]))
+	};
+	return LinearInterpolate(weight[3], prime);
+}
+
 int parseParameters(int argc, char *argv[]) {
     iflag = oflag = hflag = rflag = 0;
     ivalue = ovalue = NULL;
@@ -69,18 +93,7 @@ int parseParameters(int argc, char *argv[]) {
     return 0;
 }
 
-struct PixelRange {int start, end; };
-
-/** get x,y,z coords from out image pixels coords
- **	i,j are pixel coords
- **	face is face number
- **	edge is edge length
- **/
 void outImgToXYZ(int, int, int, int, double*, double*, double*);
-unsigned char* interpolateXYZtoColor(double,double,double, CImg<unsigned char>&);
-/**
- **	Convert panorama using an inverse pixel transformation
- **/
 void convertBack(CImg<unsigned char>&, CImg<unsigned char> **);
 
 int main (int argc, char *argv[]) {
@@ -99,29 +112,15 @@ int main (int argc, char *argv[]) {
         imgOut[i] = new CImg<unsigned char>(rvalue, rvalue, 1, 4, 255);
     }
     
-    std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
-
     // Convert panorama
     convertBack(imgIn, imgOut);
     
-    printf("Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count());
-
-    std::thread threads[6];
     // Write output images
     for (int i=0; i<6; ++i){
-        threads[i] = std::thread([&]() {
-	    std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";//".jpg";
-            imgOut[i]->save_png(fname.c_str());
-	});
+        std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";//".jpg";
+        imgOut[i]->save_png(fname.c_str());
     }
-    for (int i = 0; i < 6; i++) {
-        threads[i].join();
-    }
-    /*for (int i = 0; i < 6; i++) {
-	std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
-	imgOut[i]->save_png(fname.c_str());
-    }*/
-    printf("Total time: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count());
+    
     std::cout << "  convertation finished successfully\n";
     return 0;
 }
@@ -135,153 +134,112 @@ void convertBack(CImg<unsigned char>& imgIn, CImg<unsigned char> **imgOut){
     int _dw = rvalue*4;
     int edge = rvalue; // the length of each edge in pixels
     int face = 0;
-    
+    int width = imgIn.width();
+    int height = imgIn.height();
     // Look around cube faces
-	tbb::parallel_for(blocked_range<size_t>(0, _dw, 1), [&](const blocked_range<size_t>& range) {
-		for (size_t i=range.begin(); i<range.end(); ++i) {
-//		for (int i = 0; i < _dw; i++) {
-			int face = int(i/edge);
-			PixelRange rng = {edge, 2*edge};
-           
-			if (i>=2*edge && i<3*edge) {
-				rng = {0, 3*edge};
-			}
+    tbb::parallel_for(blocked_range<size_t>(0, _dw, 1), [&](const blocked_range<size_t>& range) {
+	int face = 0;
+        for (size_t i=range.begin(); i<range.end(); ++i) {
+            face = int(i/edge); // 0 - back, 1 - left 2 - front, 3 - right
+            PixelRange rng = {edge, 2*edge};
             
-		        for (int j=rng.start; j<rng.end; ++j) {
-				if (j<edge) {
-		                    face = 4;
-                		} else if (j>2*edge) {
-		                    face = 5;
-                		} else {
-		                    face = int(i/edge);
-                		}
-               			double x, y, z; 
-		                outImgToXYZ(i, j, face, edge, &x, &y, &z);
-//		                unsigned char *color = interpolateXYZtoColor(x,y,z,imgIn);
+            if (i>=2*edge && i<3*edge) {
+                rng = {0, 3*edge};
+            }
+            
+            for (int j=rng.start; j<rng.end; ++j) {
+                if (j<edge) {
+                    face = 4;
+                } else if (j>2*edge) {
+                    face = 5;
+                } else {
+                    face = int(i/edge);
+                }
+		double x,y,z;
+		outImgToXYZ(i, j, face, edge, &x, &y, &z);
 
-				int _sw = imgIn.width();
-				int _sh = imgIn.height();
-				double theta = std::atan2(y, x);
-				double r = std::hypot(x, y);
-				double phi = std::atan2(z, r);
-				double uf = (theta + M_PI) / M_PI * _sh;
-				double vf = (M_PI_2 - phi) / M_PI * _sh; // implicit assumption: _sh == _sw / 2
-				int ui = std::min(static_cast<int>(std::floor(uf)), _sw);
-				int vi = std::min(static_cast<int>(std::floor(vf)), _sh);
-				int u2 = std::min(ui+1, _sw);
-				int v2 = std::min(vi+1, _sh);
-				double mu = uf - ui, nu = vf - vi;
-				mu = nu = 0;
-				int width = _sw;
-				int height = _sh;
-
-				unsigned char Ra = imgIn[ui + vi * width + 0] + (imgIn[u2 + vi * width + 0] - imgIn[ui + vi * width + 0]) * mu;
-				unsigned char Ga = imgIn[ui + vi * width + 1*width*height] + (imgIn[u2 + vi * width + 1*width*height] - imgIn[ui + vi * width + 1*width*height]) * mu;
-				unsigned char Ba = imgIn[ui + vi * width + 2*width*height] + (imgIn[u2 + vi * width + 2*width*height] - imgIn[ui + vi * width + 2*width*height]) * mu;
-				unsigned char Rb = imgIn[ui + v2 * width + 0] + (imgIn[u2 + v2 * width + 0] - imgIn[ui + v2 * width + 0]) * mu;
-				unsigned char Gb = imgIn[ui + v2 * width + 1*width*height] + (imgIn[u2 + v2 * width + 1*width*height] - imgIn[ui + v2 * width + 1*width*height]) * mu;
-				unsigned char Bb = imgIn[ui + v2 * width + 2*width*height] + (imgIn[u2 + v2 * width + 2*width*height] - imgIn[ui + v2 * width + 2*width*height]) * mu;
-				unsigned char R = Ra + (Rb - Ra) * nu;
-				unsigned char G = Ga + (Gb - Ga) * nu;
-				unsigned char B = Ba + (Bb - Ba) * nu;
-
-				int whd = imgOut[face]->width()*imgOut[face]->height();
-				int idx = (i%edge) + (j%edge)*edge;
-				unsigned char *ptr = imgOut[face]->data();
-				ptr[idx + 0*edge*edge] = R;
-				ptr[idx + 1*edge*edge] = G;
-				ptr[idx + 2*edge*edge] = B;
-				ptr[idx + 3*edge*edge] = 255;
-
-/*				unsigned char *ptr = imgOut[face]->data((i%edge), (j%edge), 0, 0);
-				int bound = imgOut[face]->spectrum();
-				for (int k = 0; k < bound; k++) {
-					*ptr = (unsigned char)(color[k]);
-					ptr += whd;
-				}*/
-		     	}
+                double theta = atan2(y, x);
+		double r = hypot(x, y);
+		double phi = atan2(z, r);
+		double uf = (theta + M_PI) / M_PI * height;
+		double vf = (M_PI_2 - phi) / M_PI * height;
+		int ui = std::min(static_cast<int>(std::floor(uf)), width);
+		int vi = std::min(static_cast<int>(std::floor(vf)), height);
+		int u2 = std::min(ui + 1, width);
+		int v2 = std::min(vi + 1, height);
+		int u3 = std::min(ui + 2, width);
+		int v3 = std::min(vi + 2, height-1);
+		int u4 = std::max(ui - 1, 0);
+		int v4 = std::max(vi - 1, 0);
+		int u[4] = { ui, u2, u3, u4 };
+		int v[4] = { vi, v2, v3, v4 };
+	
+		unsigned char Rval[16];
+		unsigned char Gval[16];
+		unsigned char Bval[16];
+		unsigned char *data = imgIn.data();
+		for (int a = 0; a < 4; a++) {
+			for (int b = 0; b < 4; b++) {
+				Rval[a * 4 + b] = data[u[a] + v[b] * width + 0 * width*height];
+				Gval[a * 4 + b] = data[u[a] + v[b] * width + 1 * width*height];
+				Bval[a * 4 + b] = data[u[a] + v[b] * width + 2 * width*height];
+			}
 		}
-	});
+
+		float weight[3] = { 0.5f, 0.5f, 0.5f };
+		unsigned char R = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Rval[0]), TrilinearInterpolate(weight, &Rval[8]));
+		unsigned char G = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Gval[0]), TrilinearInterpolate(weight, &Gval[8]));
+		unsigned char B = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Bval[0]), TrilinearInterpolate(weight, &Bval[8]));
+
+		// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
+		int idx = ((i%edge) + (j%edge)*edge);
+		unsigned char *ptr = imgOut[face]->data();
+		// CImg uses planar RGBA storage, hence n*edge*edge for each value
+		ptr[idx + 0 * edge*edge] = R;
+		ptr[idx + 1 * edge*edge] = G;
+		ptr[idx + 2 * edge*edge] = B;
+		ptr[idx + 3 * edge*edge] = 255;
+
+            }
+        }
+    });
+
 }
 
-void outImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double *z) {
-    auto a = 2.0 * i / edge;
-    auto b = 2.0 * j / edge;
-
-    if (face == 0) { // back
-	*x = -1;
-	*y = 1-a;
-	*z = 3-b;
-    } else if (face == 1) { // left
-       	*x = a-3;
-	*y = -1;
-	*z = 3-b;
-    } else if (face == 2) { // front
- 	*x = 1;
-	*y = a-5;
-	*z = 3-b;
-    } else if (face == 3) { // right
- 	*x = 7-a;
-	*y = 1;
-	*z = 3-b;
-    } else if (face == 4) { // top
- 	*x = b-1;
-	*y = a-5;
-	*z = 1;
-    } else if (face==5) { // bottom
- 	*x = 5-b;
-	*y = a-5;
-	*z = -1;
-    }
-}
-
-unsigned char* ReadColor(int x, int y, CImg<unsigned char>& imgIn)
+void outImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double *z)
 {
-	unsigned char *color = new unsigned char(4);
-	unsigned char *data = imgIn.data();
-	int width = imgIn.width();
-	int height = imgIn.height();
-	color[0] = data[x + y*width];
-	color[1] = data[x + y*width + 1*width*height];
-	color[2] = data[x + y*width + 2*width*height];
-	color[3] = 255;
-	return color;
+	auto a = 2.0 * i / edge;
+	auto b = 2.0 * j / edge;
+	if (face == 0) { // back
+		*x = -1;
+		*y = 1 - a;
+		*z = 3 - b;
+	}
+	else if (face == 1) { // left
+		*x = a - 3;
+		*y = -1;
+		*z = 3 - b;
+	}
+	else if (face == 2) { // front
+		*x = 1;
+		*y = a - 5;
+		*z = 3 - b;
+	}
+	else if (face == 3) { // right
+		*x = 7 - a;
+		*y = 1;
+		*z = 3 - b;
+	}
+	else if (face == 4) { // top
+		*x = b - 1;
+		*y = a - 5;
+		*z = 1;
+	}	
+	else if (face == 5) { // bottom
+		*x = 5 - b;
+		*y = a - 5;
+		*z = -1;
+	}
 }
 
-unsigned char* MixColor(unsigned char* colorA, unsigned char* colorB, double weight)
-{
 
-	unsigned char *color = new unsigned char(4);
-	color[0] = colorA[0] + (colorB[0] - colorA[0]) * weight;
-	color[1] = colorA[1] + (colorB[1] - colorA[1]) * weight;
-	color[2] = colorA[2] + (colorB[2] - colorA[2]) * weight;
-	color[3] = 255;
-
-	delete[]colorA;
-	delete[]colorB;
-	return color;
-}
-
-unsigned char* interpolateXYZtoColor(double x, double y, double z, CImg<unsigned char>& imgIn) {
-	int _sw = imgIn.width();
-	int _sh = imgIn.height();
-
-	double theta = std::atan2(y, x);
-	double r = std::hypot(x, y);// # range -pi to pi
-	double phi = std::atan2(z, r);// # range -pi/2 to pi/2
-
-	// source img coords
-	double uf = (theta + M_PI) / M_PI * _sh;
-	double vf = (M_PI_2 - phi) / M_PI * _sh; // implicit assumption: _sh == _sw / 2
-	// Use bilinear interpolation between the four surrounding pixels
-	int ui = std::min(static_cast<int>(std::floor(uf)), _sw);
-	int vi = std::min(static_cast<int>(std::floor(vf)), _sh);
-	int u2 = std::min(ui+1, _sw);
-	int v2 = std::min(vi+1, _sh);
-	double mu = uf - ui, nu = vf - vi;      //# fraction of way across pixel
-	mu = nu = 0;
-	auto A = ReadColor(ui,vi,imgIn), B = ReadColor(u2,vi,imgIn), C = ReadColor(ui,v2,imgIn), D = ReadColor(u2,v2,imgIn);
-	auto value = MixColor(MixColor(A, B, mu), MixColor(C,D,mu), nu);
-
-	return value;
-}

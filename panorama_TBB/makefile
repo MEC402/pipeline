@@ -5,7 +5,7 @@ CC = g++
 #  -g    adds debugging information to the executable file
 #  -Wall turns on most, but not all, compiler warnings
 #  -O3   optimizes the application at a maximum level
-CFLAGS  = -v -Wall -std=c++11 -ffast-math -O3
+CFLAGS  = -g -v -Wall -std=c++11 -ffast-math -O3
 
 # the build target executable:
 TARGET = panorama
