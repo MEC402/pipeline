@@ -11,6 +11,7 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "png.h"
 #endif
 
 // Include intel TBB if we're not running on a CUDA system (CUDA is currently Windows only, TBB Linux only)
@@ -20,6 +21,7 @@
 #include <tbb/blocked_range.h>
 #endif
 
+#define cimg_use_png
 #include "CImg.h"
 using namespace cimg_library;
 
@@ -75,10 +77,48 @@ void OutImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double 
 	}
 }
 
+// Overload for nesting Interpolate calls
+__device__
+unsigned char LinearInterpolate(float target, unsigned char v1, unsigned char v2)
+{
+	return unsigned char(target*v2 + (1.0f - target) * v1);
+}
+
+// Expectes 1 target and 2 values
+__device__
+unsigned char LinearInterpolate(float target, unsigned char *values)
+{
+	return unsigned char(target * (values[1]) + (1.0f - target)*values[0]);
+}
+
+// Expects 2 targets and 4 values
+__device__
+unsigned char BilinearInterpolate(float *target, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		LinearInterpolate(target[1], &values[0]),
+		LinearInterpolate(target[1], &values[2])
+	};
+	return LinearInterpolate(target[0], prime);
+}
+
+// Expects 3 targets and 8 values
+__device__
+unsigned char TrilinearInterpolate(float *target, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		BilinearInterpolate(&(target[0]), &(values[0])),
+		BilinearInterpolate(&(target[1]), &(values[4]))
+	};
+	return LinearInterpolate(target[3], prime);
+}
+
+// Convert the entire cubemap at once
 __global__
-void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back,
+/*void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back,
 	unsigned char *left, unsigned char *right, unsigned char *top, unsigned char *bottom,
-	int width, int height, int rvalue)
+	int width, int height, int rvalue)*/
+void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int height, int rvalue)
 {
 	long TstripWidth = rvalue * 4; // Use long in case we're using gigantic 32k+ images
 	int edge = rvalue;
@@ -110,6 +150,7 @@ void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back
 			double x, y, z;
 			OutImgToXYZ(i, j, face, edge, &x, &y, &z);
 
+			/*
 			unsigned char *facePtr;
 			switch (face) {
 			case 0:
@@ -131,6 +172,7 @@ void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back
 				facePtr = bottom;
 				break;
 			}
+			*/
 
 			double theta = atan2(y, x);
 			double r = hypot(x, y);
@@ -141,30 +183,40 @@ void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back
 			int vi = min(static_cast<int>(std::floor(vf)), height);
 			int u2 = min(ui + 1, width);
 			int v2 = min(vi + 1, height);
+			int u3 = min(ui + 2, width);
+			int v3 = min(vi + 2, height);
+			int u4 = max(ui - 1, 0);
+			int v4 = max(vi - 1, 0);
+			int u[4] = { ui, u2, u3, u4 };
+			int v[4] = { vi, v2, v3, v4 };
 			double mu = uf - ui, nu = vf - vi;
 			mu = nu = 0;
 
-			// This is the old "read" and "mix" operations unraveled
-			// Take first R from ui/vi then mix with second R from u2/vi
-			// Repeat for G/B and RGB again for ui/v2 u2/v2
-			unsigned char Ra = unsigned char(imgIn[ui + vi * width + 0 * width*height] + (imgIn[u2 + vi * width + 0 * width*height] - imgIn[ui + vi * width + 0 * width*height]) * mu);
-			unsigned char Ga = unsigned char(imgIn[ui + vi * width + 1 * width*height] + (imgIn[u2 + vi * width + 1 * width*height] - imgIn[ui + vi * width + 1 * width*height]) * mu);
-			unsigned char Ba = unsigned char(imgIn[ui + vi * width + 2 * width*height] + (imgIn[u2 + vi * width + 2 * width*height] - imgIn[ui + vi * width + 2 * width*height]) * mu);
-			unsigned char Rb = unsigned char(imgIn[ui + v2 * width + 0 * width*height] + (imgIn[u2 + v2 * width + 0 * width*height] - imgIn[ui + v2 * width + 0 * width*height]) * mu);
-			unsigned char Gb = unsigned char(imgIn[ui + v2 * width + 1 * width*height] + (imgIn[u2 + v2 * width + 1 * width*height] - imgIn[ui + v2 * width + 1 * width*height]) * mu);
-			unsigned char Bb = unsigned char(imgIn[ui + v2 * width + 2 * width*height] + (imgIn[u2 + v2 * width + 2 * width*height] - imgIn[ui + v2 * width + 2 * width*height]) * mu);
-			// Finally mix Ra/Rb etc together for finally interpolated color
-			unsigned char R = Ra + (Rb - Ra) * nu;
-			unsigned char G = Ga + (Gb - Ga) * nu;
-			unsigned char B = Ba + (Bb - Ba) * nu;
+			unsigned char Rval[16];
+			unsigned char Gval[16];
+			unsigned char Bval[16];
+
+			for (int a = 0; a < 4; a++) {
+				for (int b = 0; b < 4; b++) {
+					Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
+					Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
+					Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+				}
+			}
+
+			float weight[3] = { 0.5f, 0.5f, 0.5f };
+			unsigned char R = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Rval[0]), TrilinearInterpolate(weight, &Rval[8]));
+			unsigned char G = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Gval[0]), TrilinearInterpolate(weight, &Gval[8]));
+			unsigned char B = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Bval[0]), TrilinearInterpolate(weight, &Bval[8]));
 
 			// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
 			int idx = ((i%edge) + (j%edge)*edge);
+			unsigned char *ptr = imgOut[face];
 			// CImg uses planar RGBA storage, hence n*edge*edge for each value
-			facePtr[idx + 0 * edge*edge] = R;
-			facePtr[idx + 1 * edge*edge] = G;
-			facePtr[idx + 2 * edge*edge] = B;
-			facePtr[idx + 3 * edge*edge] = 255;
+			ptr[idx + 0 * edge*edge] = R;
+			ptr[idx + 1 * edge*edge] = G;
+			ptr[idx + 2 * edge*edge] = B;
+			ptr[idx + 3 * edge*edge] = 255;
 		}
 	}
 }
@@ -215,6 +267,8 @@ void GetFaceStartEnd(int face, int srcWidth, int srcHeight, int edgeSize,
 	}
 }
 
+
+// Convert faces one at a time if we can't fit everything in memory at once
 __global__
 void ConvertFace(unsigned char *imgIn, unsigned char *imgOut, int face, int width, int height, int rvalue)
 {
@@ -242,22 +296,30 @@ void ConvertFace(unsigned char *imgIn, unsigned char *imgOut, int face, int widt
 			int vi = min(static_cast<int>(std::floor(vf)), height);
 			int u2 = min(ui + 1, width);
 			int v2 = min(vi + 1, height);
+			int u3 = min(ui + 2, width);
+			int v3 = min(vi + 2, height);
+			int u4 = max(ui - 1, 0);
+			int v4 = max(vi - 1, 0);
+			int u[4] = { ui, u2, u3, u4 };
+			int v[4] = { vi, v2, v3, v4 };
 			double mu = uf - ui, nu = vf - vi;
 			mu = nu = 0;
 
-			// This is the old "read" and "mix" operations unraveled
-			// Take first R from ui/vi then mix with second R from u2/vi
-			// Repeat for G/B and RGB again for ui/v2 u2/v2
-			unsigned char Ra = unsigned char(imgIn[ui + vi * width + 0 * width*height] + (imgIn[u2 + vi * width + 0 * width*height] - imgIn[ui + vi * width + 0 * width*height]) * mu);
-			unsigned char Ga = unsigned char(imgIn[ui + vi * width + 1 * width*height] + (imgIn[u2 + vi * width + 1 * width*height] - imgIn[ui + vi * width + 1 * width*height]) * mu);
-			unsigned char Ba = unsigned char(imgIn[ui + vi * width + 2 * width*height] + (imgIn[u2 + vi * width + 2 * width*height] - imgIn[ui + vi * width + 2 * width*height]) * mu);
-			unsigned char Rb = unsigned char(imgIn[ui + v2 * width + 0 * width*height] + (imgIn[u2 + v2 * width + 0 * width*height] - imgIn[ui + v2 * width + 0 * width*height]) * mu);
-			unsigned char Gb = unsigned char(imgIn[ui + v2 * width + 1 * width*height] + (imgIn[u2 + v2 * width + 1 * width*height] - imgIn[ui + v2 * width + 1 * width*height]) * mu);
-			unsigned char Bb = unsigned char(imgIn[ui + v2 * width + 2 * width*height] + (imgIn[u2 + v2 * width + 2 * width*height] - imgIn[ui + v2 * width + 2 * width*height]) * mu);
-			// Finally mix Ra/Rb etc together for finally interpolated color
-			unsigned char R = Ra + (Rb - Ra) * nu;
-			unsigned char G = Ga + (Gb - Ga) * nu;
-			unsigned char B = Ba + (Bb - Ba) * nu;
+			unsigned char Rval[16];
+			unsigned char Gval[16];
+			unsigned char Bval[16];
+
+			for (int a = 0; a < 4; a++) {
+				for (int b = 0; b < 4; b++) {
+					Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
+					Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
+					Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+				}
+			}
+			float weight[3] = { 0.5f, 0.5f, 0.5f };
+			unsigned char R = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Rval[0]), TrilinearInterpolate(weight, &Rval[8]));
+			unsigned char G = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Gval[0]), TrilinearInterpolate(weight, &Gval[8]));
+			unsigned char B = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Bval[0]), TrilinearInterpolate(weight, &Bval[8]));
 
 			// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
 			int idx = ((i%edge) + (j%edge)*edge);
@@ -488,10 +550,10 @@ int main(int argc, char *argv[])
 		}
 
 		if (outSize * 6 > free_memory) {
-			//std::thread threads[6];
+			std::thread threads[6];
 			fprintf(stderr, "Not enough memory on device to run all faces in parallel, running one face at a time\n");
 			unsigned char *d_ImgOut, *h_ImgOut;
-			//HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgOut, outSize * sizeof(unsigned char)));
+
 			HANDLE_ERROR(cudaMalloc((void**)&d_ImgOut, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMallocHost((void**)&h_ImgOut, outSize * sizeof(unsigned char)));
 			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
@@ -503,111 +565,150 @@ int main(int argc, char *argv[])
 				ConvertFace <<<blockCount, blockSize >>> (d_ImgIn, d_ImgOut, i, width, height, edge);
 				HANDLE_ERROR(cudaDeviceSynchronize());
 				HANDLE_ERROR(cudaThreadSynchronize());
-				//std::memcpy(imgOut[i], d_ImgOut, outSize * sizeof(unsigned char));
 				HANDLE_ERROR(cudaMemcpy(h_ImgOut, d_ImgOut, outSize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 				std::memcpy(imgOut[i], h_ImgOut, outSize * sizeof(unsigned char));
-				std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
-				CImgOut[i]->save_png(fname.c_str());
-				CImgOut[i]->clear();
-				//threads[i] = std::thread([&]() {
-				//	std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
-				//	CImgOut[i]->save_png(fname.c_str());
-				//	CImgOut[i]->clear();
-				//});
+				threads[i] = std::thread([&, i]() {
+					std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
+					CImgOut[i]->save_png(fname.c_str());
+					CImgOut[i]->clear();
+					printf("Thread %d finished writing to disk\n", i);
+				});
 			}
 			HANDLE_ERROR(cudaFree(d_ImgIn));
 			HANDLE_ERROR(cudaFree(d_ImgOut));
 			HANDLE_ERROR(cudaFreeHost(h_ImgOut));
 			fprintf(stderr, "Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t1).count());
-			//for (int i = 0; i < 6; i++) {
-			//	threads[i].join();
-			//}
-			//for (int i = 0; i < 6; i++) {
-			//	std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
-			//	CImgOut[i]->save_png(fname.c_str());
-			//}
+			for (int i = 0; i < 6; i++) {
+				threads[i].join();
+				printf("Joined thread %d\n", i);
+			}
 			fprintf(stderr, "Total Time To Convert And Write: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - total).count());
 		}
 		else {
 
+			unsigned char **d_Faces;
+			HANDLE_ERROR(cudaMallocManaged((void**)&d_Faces, sizeof(unsigned char*) * 6));
+			for (int i = 0; i < 6; i++) {
+				HANDLE_ERROR(cudaMallocManaged((void**)&d_Faces[i], outSize * sizeof(unsigned char)));
+				HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
+				printf("Free Device Memory: %lldMB\n", free_memory / 1024 / 1024);
+			}
+			/*
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgFront, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
 
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgBack, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
 
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgLeft, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
 
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgRight, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
 
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgTop, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
 
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgBottom, outSize * sizeof(unsigned char)));
 			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lld\n", free_memory);
+			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
+			*/
 
 			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
 			int blockSize = 256;
-			int blockCount = (ImgIn.width() + blockSize - 1) / blockSize;
+			int blockCount = (width + blockSize - 1) / blockSize;
 			fprintf(stderr, "Starting...\n");
-			ConvertBack << <blockCount, blockSize >> > (d_ImgIn, d_ImgFront, d_ImgBack, d_ImgLeft, d_ImgRight, d_ImgTop, d_ImgBottom, ImgIn.width(), ImgIn.height(), edge);
+			//ConvertBack <<<blockCount, blockSize>>> (d_ImgIn, d_ImgFront, d_ImgBack, d_ImgLeft, d_ImgRight, d_ImgTop, d_ImgBottom, width, height, edge);
+			ConvertBack <<<blockCount, blockSize >>> (d_ImgIn, d_Faces, width, height, edge);
 			HANDLE_ERROR(cudaDeviceSynchronize());
+			HANDLE_ERROR(cudaThreadSynchronize());
 			HANDLE_ERROR(cudaFree(d_ImgIn));
 			fprintf(stderr, "Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t1).count());
 			fprintf(stderr, "Synchronized\n");
 
 
-			// TODO: Loop this
-			std::string filename = std::string(ovalue); // This is so stupid
-			std::string copy = filename;
-			copy.append("_0.png");
-			printf("Writing Back...\n");
+			std::thread threads[6];
+			for (int i = 0; i < 6; i++) {
+				std::memcpy(imgOut[i], d_Faces[i], outSize * sizeof(unsigned char));
+				HANDLE_ERROR(cudaFree(d_Faces[i]));
+				threads[i] = std::thread([&, i]() {
+					std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
+					CImgOut[i]->save_png(fname.c_str());
+					CImgOut[i]->clear();
+				});
+			}
+			HANDLE_ERROR(cudaFree(d_Faces));
+			/*
 			std::memcpy(imgOut[0], d_ImgBack, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgBack));
-			CImgOut[0]->save_png(copy.c_str());
-
-			printf("Writing Front...\n");
-			copy = filename;
-			copy.append("_1.png");
+			printf("Writing Back...\n");
+			std::string filename = std::string(ovalue) + "_" + std::to_string(0) + ".png";
+			int n = 0;
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			n++;
+			
 			std::memcpy(imgOut[1], d_ImgFront, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgFront));
-			CImgOut[1]->save_png(copy.c_str());
-
-			printf("Writing Left...\n");
-			copy = filename;
-			copy.append("_2.png");
+			printf("Writing Front...\n");
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			n++;
+			
 			std::memcpy(imgOut[2], d_ImgLeft, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgLeft));
-			CImgOut[2]->save_png(copy.c_str());
-
-			printf("Writing Right...\n");
-			copy = filename;
-			copy.append("_3.png");
+			printf("Writing Left...\n");
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			n++;
+			
 			std::memcpy(imgOut[3], d_ImgRight, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgRight));
-			CImgOut[3]->save_png(copy.c_str());
-
-			printf("Writing Top...\n");
-			copy = filename;
-			copy.append("_4.png");
+			printf("Writing Right...\n");
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			n++;
+			
 			std::memcpy(imgOut[4], d_ImgTop, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgTop));
-			CImgOut[4]->save_png(copy.c_str());
-
-			printf("Writing Bottom...\n");
-			copy = filename;
-			copy.append("_5.png");
+			printf("Writing Top...\n");
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			n++;
+			
 			std::memcpy(imgOut[5], d_ImgBottom, outSize * sizeof(unsigned char));
 			HANDLE_ERROR(cudaFree(d_ImgBottom));
-			CImgOut[5]->save_png(copy.c_str());
+			printf("Writing Bottom...\n");
+			threads[n] = std::thread([&, n]() {
+				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
+				CImgOut[n]->save_png(filename.c_str());
+				CImgOut[n]->clear();
+			});
+			*/
+			for (int i = 0; i < 6; i++) {
+				threads[i].join();
+			}
+
 			fprintf(stderr, "Total Time To Convert And Write: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - total).count());
 		}
 	}
