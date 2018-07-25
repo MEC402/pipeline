@@ -7,6 +7,7 @@
 #include <chrono>
 #include <thread>
 
+
 #ifdef _WIN32
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -14,13 +15,14 @@
 #include "png.h"
 #endif
 
-// Include intel TBB if we're not running on a CUDA system (CUDA is currently Windows only, TBB Linux only)
 #ifdef __linux__
 #include <unistd.h>
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
 #endif
 
+// If on windows: Make sure libpng nuget package is installed to make use of native png saving
+// If on linux: Make sure libpng is linked against when compiling
 #define cimg_use_png
 #include "CImg.h"
 using namespace cimg_library;
@@ -79,45 +81,42 @@ void OutImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double 
 
 // Overload for nesting Interpolate calls
 __device__
-unsigned char LinearInterpolate(float target, unsigned char v1, unsigned char v2)
+inline unsigned char LinearInterpolate(float weight, unsigned char v1, unsigned char v2)
 {
-	return unsigned char(target*v2 + (1.0f - target) * v1);
+	return unsigned char(weight*v2 + (1.0f - weight) * v1);
 }
 
-// Expectes 1 target and 2 values
+// Expectes 1 weight and 2 values
 __device__
-unsigned char LinearInterpolate(float target, unsigned char *values)
+inline unsigned char LinearInterpolate(float weight, unsigned char *values)
 {
-	return unsigned char(target * (values[1]) + (1.0f - target)*values[0]);
+	return unsigned char(weight * (values[1]) + (1.0f - weight)*values[0]);
 }
 
-// Expects 2 targets and 4 values
+// Expects 2 weights and 4 values
 __device__
-unsigned char BilinearInterpolate(float *target, unsigned char *values)
+inline unsigned char BilinearInterpolate(float *weight, unsigned char *values)
 {
 	unsigned char prime[2] = {
-		LinearInterpolate(target[1], &values[0]),
-		LinearInterpolate(target[1], &values[2])
+		LinearInterpolate(weight[1], &values[0]),
+		LinearInterpolate(weight[1], &values[2])
 	};
-	return LinearInterpolate(target[0], prime);
+	return LinearInterpolate(weight[0], prime);
 }
 
-// Expects 3 targets and 8 values
+// Expects 3 weights and 8 values
 __device__
-unsigned char TrilinearInterpolate(float *target, unsigned char *values)
+inline unsigned char TrilinearInterpolate(float *weight, unsigned char *values)
 {
 	unsigned char prime[2] = {
-		BilinearInterpolate(&(target[0]), &(values[0])),
-		BilinearInterpolate(&(target[1]), &(values[4]))
+		BilinearInterpolate(&(weight[0]), &(values[0])),
+		BilinearInterpolate(&(weight[1]), &(values[4]))
 	};
-	return LinearInterpolate(target[3], prime);
+	return LinearInterpolate(weight[3], prime);
 }
 
 // Convert the entire cubemap at once
 __global__
-/*void ConvertBack(unsigned char *imgIn, unsigned char *front, unsigned char *back,
-	unsigned char *left, unsigned char *right, unsigned char *top, unsigned char *bottom,
-	int width, int height, int rvalue)*/
 void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int height, int rvalue)
 {
 	long TstripWidth = rvalue * 4; // Use long in case we're using gigantic 32k+ images
@@ -150,30 +149,6 @@ void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int he
 			double x, y, z;
 			OutImgToXYZ(i, j, face, edge, &x, &y, &z);
 
-			/*
-			unsigned char *facePtr;
-			switch (face) {
-			case 0:
-				facePtr = back;
-				break;
-			case 1:
-				facePtr = left;
-				break;
-			case 2:
-				facePtr = front;
-				break;
-			case 3:
-				facePtr = right;
-				break;
-			case 4:
-				facePtr = top;
-				break;
-			case 5:
-				facePtr = bottom;
-				break;
-			}
-			*/
-
 			double theta = atan2(y, x);
 			double r = hypot(x, y);
 			double phi = atan2(z, r);
@@ -189,8 +164,6 @@ void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int he
 			int v4 = max(vi - 1, 0);
 			int u[4] = { ui, u2, u3, u4 };
 			int v[4] = { vi, v2, v3, v4 };
-			double mu = uf - ui, nu = vf - vi;
-			mu = nu = 0;
 
 			unsigned char Rval[16];
 			unsigned char Gval[16];
@@ -198,6 +171,9 @@ void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int he
 
 			for (int a = 0; a < 4; a++) {
 				for (int b = 0; b < 4; b++) {
+					if (u[a] + v[b] * width + 2 * width*height > width*height * 3) {
+						printf("%d %d %d %d %d %d\n", a, b, u[a], v[b], width, height, u[a] + v[b] * width + 2 * width*height, width*height * 3);
+					}
 					Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
 					Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
 					Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
@@ -333,6 +309,41 @@ void ConvertFace(unsigned char *imgIn, unsigned char *imgOut, int face, int widt
 }
 #endif
 
+
+
+// Overload for nesting Interpolate calls
+unsigned char Linear(float weight, unsigned char v1, unsigned char v2)
+{
+	return unsigned char(weight*v2 + (1.0f - weight) * v1);
+}
+
+// Expectes 1 weight and 2 values
+unsigned char Linear(float weight, unsigned char *values)
+{
+	return unsigned char(weight * (values[1]) + (1.0f - weight)*values[0]);
+}
+
+// Expects 2 weights and 4 values
+unsigned char Bilinear(float *weight, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		Linear(weight[1], &values[0]),
+		Linear(weight[1], &values[2])
+	};
+	return Linear(weight[0], prime);
+}
+
+// Expects 3 weights and 8 values
+unsigned char Trilinear(float *weight, unsigned char *values)
+{
+	unsigned char prime[2] = {
+		Bilinear(&(weight[0]), &(values[0])),
+		Bilinear(&(weight[1]), &(values[4]))
+	};
+	return Linear(weight[3], prime);
+}
+
+
 void ImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double *z) {
 	auto a = 2.0 * i / edge;
 	auto b = 2.0 * j / edge;
@@ -369,21 +380,19 @@ void ImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double *z)
 	}
 }
 
-/**
-**	Convert panorama using an inverse pixel transformation on CPU
-**/
+// Convert panorama using an inverse pixel transformation on CPU
 void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int height) {
 	int TotalWidth = edge * 4; // Total width of the T-Strip image
 	int start = 0;
 	int end = 0;
 
-							   // i/j are T-Strip coordinates, *not* source image coordinates
-#ifdef _WIN32
-							   // Pardon the sloppy indent on these two loops, it just makes it easier to read with the macros
-	for (int i = 0; i < TotalWidth; i++) {
-#elif __linux__
-	tbb::parallel_for(blocked_range<size_t>(0, TotalWidth, 1), [&](const blocked_range<size_t>& range) {
+	// i/j are T-Strip coordinates, that then get converted to XYZ spherical projection coordinates
+#ifdef __linux__
+	tbb::parallel_for(tbb::blocked_range<size_t>(0, TotalWidth, 1), [&](const tbb::blocked_range<size_t>& range) {
 		for (size_t i = range.begin(); i < range.end(); i++) {
+#endif
+#ifdef _WIN32
+	for (int i = 0; i < TotalWidth; i++) {
 #endif
 			int face = int(i / edge);
 			start = (i >= 2 * edge && i < 3 * edge) ? 0 : edge;
@@ -405,32 +414,45 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 				double x, y, z;
 				ImgToXYZ(i, j, face, edge, &x, &y, &z);
 
-				// Convert unit-cube coordinates into projected unit-sphere coordinates
 				double theta = std::atan2(y, x);
 				double r = std::hypot(x, y);
 				double phi = std::atan2(z, r);
 				double uf = (theta + M_PI) / M_PI * height;
 				double vf = (M_PI_2 - phi) / M_PI * height;
+				/*
+					Coordinate structure:
+					[     ][     ][     ][u3/v4]
+					[     ][     ][u2/v2][     ]
+					[     ][ui/vi][     ][     ]
+					[u4/v4][     ][     ][     ]
+				*/
 				int ui = std::min(static_cast<int>(std::floor(uf)), width);
 				int vi = std::min(static_cast<int>(std::floor(vf)), height);
 				int u2 = std::min(ui + 1, width);
 				int v2 = std::min(vi + 1, height);
-				double mu = uf - ui, nu = vf - vi;
-				mu = nu = 0;
+				int u3 = std::min(ui + 2, width);
+				int v3 = std::min(vi + 2, height-1); // Some weird bug here, if v3 == width we step outside memory bounds.  It shouldn't matter because we're sampling 16 coords hopefully
+				int u4 = std::max(ui - 1, 0);
+				int v4 = std::max(vi - 1, 0);
+				int u[4] = { ui, u2, u3, u4 };
+				int v[4] = { vi, v2, v3, v4 };
 
-				// This is the old "read" and "mix" operations unraveled
-				// Take first R from ui/vi then mix with second R from u2/vi
-				// Repeat for G/B and RGB again for ui/v2 u2/v2
-				unsigned char Ra = unsigned char(imgIn[ui + vi * width + 0 * width*height] + (imgIn[u2 + vi * width + 0 * width*height] - imgIn[ui + vi * width + 0 * width*height]) * mu);
-				unsigned char Ga = unsigned char(imgIn[ui + vi * width + 1 * width*height] + (imgIn[u2 + vi * width + 1 * width*height] - imgIn[ui + vi * width + 1 * width*height]) * mu);
-				unsigned char Ba = unsigned char(imgIn[ui + vi * width + 2 * width*height] + (imgIn[u2 + vi * width + 2 * width*height] - imgIn[ui + vi * width + 2 * width*height]) * mu);
-				unsigned char Rb = unsigned char(imgIn[ui + v2 * width + 0 * width*height] + (imgIn[u2 + v2 * width + 0 * width*height] - imgIn[ui + v2 * width + 0 * width*height]) * mu);
-				unsigned char Gb = unsigned char(imgIn[ui + v2 * width + 1 * width*height] + (imgIn[u2 + v2 * width + 1 * width*height] - imgIn[ui + v2 * width + 1 * width*height]) * mu);
-				unsigned char Bb = unsigned char(imgIn[ui + v2 * width + 2 * width*height] + (imgIn[u2 + v2 * width + 2 * width*height] - imgIn[ui + v2 * width + 2 * width*height]) * mu);
-				// Finally mix Ra/Rb etc together for finally interpolated color
-				unsigned char R = Ra + (Rb - Ra) * nu;
-				unsigned char G = Ga + (Gb - Ga) * nu;
-				unsigned char B = Ba + (Bb - Ba) * nu;
+				unsigned char Rval[16];
+				unsigned char Gval[16];
+				unsigned char Bval[16];
+
+				for (int a = 0; a < 4; a++) {
+					for (int b = 0; b < 4; b++) {
+						Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
+						Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
+						Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+					}
+				}
+
+				float weight[3] = { 0.5f, 0.5f, 0.5f };
+				unsigned char R = Linear(weight[0], Trilinear(weight, &Rval[0]), Trilinear(weight, &Rval[8]));
+				unsigned char G = Linear(weight[0], Trilinear(weight, &Gval[0]), Trilinear(weight, &Gval[8]));
+				unsigned char B = Linear(weight[0], Trilinear(weight, &Bval[0]), Trilinear(weight, &Bval[8]));
 
 				// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
 				int idx = ((i%edge) + (j%edge)*edge);
@@ -491,6 +513,9 @@ int parseParameters(int argc, char *argv[]) {
 			rflag = 1;
 			edge = std::stoi(optarg);
 			break;
+		case 'c':
+			cflag = 1;
+			break;
 		case '?':
 			if (optopt == 'i' || optopt == 'o' || optopt == 'r')
 				fprintf(stderr, "Option -%c requires an argument.\n", optopt);
@@ -515,11 +540,10 @@ int parseParameters(int argc, char *argv[]) {
 
 int main(int argc, char *argv[])
 {
-
 	parseParameters(argc, argv);
-
+	printf("Converting [%s] to faces [%s] with size [%d]...\n", ivalue, ovalue, edge);
 	CImg<unsigned char> ImgIn(ivalue);
-
+	printf("%d\n", ImgIn.size());
 	// Create output images
 	CImg<unsigned char>* CImgOut[6];
 	unsigned char* imgOut[6];
@@ -529,10 +553,11 @@ int main(int argc, char *argv[])
 	}
 	std::chrono::high_resolution_clock::time_point total = std::chrono::high_resolution_clock::now();
 	if (cflag) {
+		printf("Using CUDA for processing\n");
 		int InSize = ImgIn.size();
 		int width = ImgIn.width();
 		int height = ImgIn.height();
-		unsigned char *d_ImgIn, *d_ImgFront, *d_ImgBack, *d_ImgLeft, *d_ImgRight, *d_ImgTop, *d_ImgBottom;
+		unsigned char *d_ImgIn;
 		HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgIn, InSize * sizeof(unsigned char)));
 		std::memcpy(d_ImgIn, ImgIn.data(), InSize * sizeof(unsigned char));
 		ImgIn.clear();
@@ -585,7 +610,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Total Time To Convert And Write: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - total).count());
 		}
 		else {
-
+			printf("Allocating GPU memory\n");
 			unsigned char **d_Faces;
 			HANDLE_ERROR(cudaMallocManaged((void**)&d_Faces, sizeof(unsigned char*) * 6));
 			for (int i = 0; i < 6; i++) {
@@ -593,43 +618,17 @@ int main(int argc, char *argv[])
 				HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
 				printf("Free Device Memory: %lldMB\n", free_memory / 1024 / 1024);
 			}
-			/*
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgFront, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgBack, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgLeft, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgRight, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgTop, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-
-			HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgBottom, outSize * sizeof(unsigned char)));
-			HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory));
-			printf("Free Memory: %lldMB\n", free_memory / 1024 / 1024);
-			*/
 
 			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
 			int blockSize = 256;
 			int blockCount = (width + blockSize - 1) / blockSize;
-			fprintf(stderr, "Starting...\n");
-			//ConvertBack <<<blockCount, blockSize>>> (d_ImgIn, d_ImgFront, d_ImgBack, d_ImgLeft, d_ImgRight, d_ImgTop, d_ImgBottom, width, height, edge);
+			fprintf(stderr, "Starting conversion...\n");
 			ConvertBack <<<blockCount, blockSize >>> (d_ImgIn, d_Faces, width, height, edge);
 			HANDLE_ERROR(cudaDeviceSynchronize());
 			HANDLE_ERROR(cudaThreadSynchronize());
 			HANDLE_ERROR(cudaFree(d_ImgIn));
 			fprintf(stderr, "Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t1).count());
-			fprintf(stderr, "Synchronized\n");
+			fprintf(stderr, "Device Synchronized\n");
 
 
 			std::thread threads[6];
@@ -638,73 +637,13 @@ int main(int argc, char *argv[])
 				HANDLE_ERROR(cudaFree(d_Faces[i]));
 				threads[i] = std::thread([&, i]() {
 					std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
+					printf("Writing %s to disk\n", fname.c_str());
 					CImgOut[i]->save_png(fname.c_str());
 					CImgOut[i]->clear();
+					printf("Finished writing %s\n", fname.c_str());
 				});
 			}
 			HANDLE_ERROR(cudaFree(d_Faces));
-			/*
-			std::memcpy(imgOut[0], d_ImgBack, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgBack));
-			printf("Writing Back...\n");
-			std::string filename = std::string(ovalue) + "_" + std::to_string(0) + ".png";
-			int n = 0;
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			n++;
-			
-			std::memcpy(imgOut[1], d_ImgFront, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgFront));
-			printf("Writing Front...\n");
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			n++;
-			
-			std::memcpy(imgOut[2], d_ImgLeft, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgLeft));
-			printf("Writing Left...\n");
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			n++;
-			
-			std::memcpy(imgOut[3], d_ImgRight, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgRight));
-			printf("Writing Right...\n");
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			n++;
-			
-			std::memcpy(imgOut[4], d_ImgTop, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgTop));
-			printf("Writing Top...\n");
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			n++;
-			
-			std::memcpy(imgOut[5], d_ImgBottom, outSize * sizeof(unsigned char));
-			HANDLE_ERROR(cudaFree(d_ImgBottom));
-			printf("Writing Bottom...\n");
-			threads[n] = std::thread([&, n]() {
-				std::string filename = std::string(ovalue) + "_" + std::to_string(n) + ".png";
-				CImgOut[n]->save_png(filename.c_str());
-				CImgOut[n]->clear();
-			});
-			*/
 			for (int i = 0; i < 6; i++) {
 				threads[i].join();
 			}
@@ -713,11 +652,20 @@ int main(int argc, char *argv[])
 		}
 	}
 	else {
+		printf("Using CPU for Processing\n");
 		ConvertCPU(ImgIn.data(), imgOut, ImgIn.width(), ImgIn.height());
-
+		std::thread threads[6];
 		for (int i = 0; i < 6; i++) {
-			std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
-			CImgOut[i]->save_png(fname.c_str());
+			threads[i] = std::thread([&, i]() {
+				std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
+				printf("Writing %s to disk\n", fname.c_str());
+				CImgOut[i]->save_png(fname.c_str());
+				CImgOut[i]->clear();
+				printf("Finished writing %s\n", fname.c_str());
+			});
+		}
+		for (int i = 0; i < 6; i++) {
+			threads[i].join();
 		}
 		fprintf(stderr, "Total Time To Convert And Write: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - total).count());
 	}
