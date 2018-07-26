@@ -33,6 +33,7 @@ char *ivalue, *ovalue;
 int edge = 512;
 
 #ifdef _WIN32
+#pragma region CUDACALLS
 inline static void HandleError(cudaError_t err, const char *file, int line)
 {
 	if (err != cudaSuccess) {
@@ -149,6 +150,8 @@ void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int he
 			double x, y, z;
 			OutImgToXYZ(i, j, face, edge, &x, &y, &z);
 
+			// This was originally a seperate function, but CUDA likes to do things in-place if it can.
+			// Chaining device function calls leads to memory complexity and debugging CUDA is a real PITA
 			double theta = atan2(y, x);
 			double r = hypot(x, y);
 			double phi = atan2(z, r);
@@ -169,17 +172,16 @@ void ConvertBack(unsigned char *imgIn, unsigned char **imgOut, int width, int he
 			unsigned char Gval[16];
 			unsigned char Bval[16];
 
+			// Get the RGB values of our 16 pixels
 			for (int a = 0; a < 4; a++) {
 				for (int b = 0; b < 4; b++) {
-					if (u[a] + v[b] * width + 2 * width*height > width*height * 3) {
-						printf("%d %d %d %d %d %d\n", a, b, u[a], v[b], width, height, u[a] + v[b] * width + 2 * width*height, width*height * 3);
-					}
 					Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
 					Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
 					Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
 				}
 			}
 
+			// Interpolate to get our desired single pixel color value
 			float weight[3] = { 0.5f, 0.5f, 0.5f };
 			unsigned char R = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Rval[0]), TrilinearInterpolate(weight, &Rval[8]));
 			unsigned char G = LinearInterpolate(weight[0], TrilinearInterpolate(weight, &Gval[0]), TrilinearInterpolate(weight, &Gval[8]));
@@ -307,6 +309,7 @@ void ConvertFace(unsigned char *imgIn, unsigned char *imgOut, int face, int widt
 		}
 	}
 }
+#pragma endregion CUDACALLS
 #endif
 
 
@@ -392,80 +395,100 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 		for (size_t i = range.begin(); i < range.end(); i++) {
 #endif
 #ifdef _WIN32
-	printf("TBB is not yet implemented for Windows, it is recommended you run this on a Linux instance with TBB installed or on a CUDA compatible Windows system.\n");
-	for (int i = 0; i < TotalWidth; i++) {
+	printf("TBB is not yet implemented for Windows, STL threads will be used in place of it.  This likely will not be as performant.\n");
+	int maxthreads = std::thread::hardware_concurrency();
+	std::thread *threads = new std::thread[maxthreads];
+	for (int n = 0; n < maxthreads; n++) {
+		threads[n] = std::thread([&, n](int stepping) {
+			for (int i = n; i < TotalWidth; i += stepping) {
 #endif
-			int face = int(i / edge);
-			start = (i >= 2 * edge && i < 3 * edge) ? 0 : edge;
-			end = (i >= 2 * edge && i < 3 * edge) ? edge * 3 : edge * 2;
+				int face = int(i / edge);
+				start = (i >= 2 * edge && i < 3 * edge) ? 0 : edge;
+				end = (i >= 2 * edge && i < 3 * edge) ? edge * 3 : edge * 2;
 
-			// Range start/end determine where in the T-strip to look vertically
-			for (int j = start; j < end; ++j) {
-				if (j < edge) { // Check if we're above the middle of the strip, then it's the top face
-					face = 4;
-				}
-				else if (j > 2 * edge) { // If we're below the middle of the strip, bottom face
-					face = 5;
-				}
-				else {
-					face = int(i / edge); // In the middle of the strip, determine by ratio what face we have
-				}
-
-				// Covert T-Strip coordinates to unit-cube coordinates
-				double x, y, z;
-				ImgToXYZ(i, j, face, edge, &x, &y, &z);
-
-				double theta = std::atan2(y, x);
-				double r = std::hypot(x, y);
-				double phi = std::atan2(z, r);
-				double uf = (theta + M_PI) / M_PI * height;
-				double vf = (M_PI_2 - phi) / M_PI * height;
-				/*
-					Coordinate structure:
-					[     ][     ][     ][u3/v4]
-					[     ][     ][u2/v2][     ]
-					[     ][ui/vi][     ][     ]
-					[u4/v4][     ][     ][     ]
-				*/
-				int ui = std::min(static_cast<int>(std::floor(uf)), width);
-				int vi = std::min(static_cast<int>(std::floor(vf)), height);
-				int u2 = std::min(ui + 1, width);
-				int v2 = std::min(vi + 1, height);
-				int u3 = std::min(ui + 2, width);
-				int v3 = std::min(vi + 2, height-1); // Some weird bug here, if v3 == width we step outside memory bounds.  It shouldn't matter because we're sampling 16 coords hopefully
-				int u4 = std::max(ui - 1, 0);
-				int v4 = std::max(vi - 1, 0);
-				int u[4] = { ui, u2, u3, u4 };
-				int v[4] = { vi, v2, v3, v4 };
-
-				unsigned char Rval[16];
-				unsigned char Gval[16];
-				unsigned char Bval[16];
-
-				for (int a = 0; a < 4; a++) {
-					for (int b = 0; b < 4; b++) {
-						Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
-						Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
-						Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+				// Range start/end determine where in the T-strip to look vertically
+				for (int j = start; j < end; ++j) {
+					if (j < edge) { // Check if we're above the middle of the strip, then it's the top face
+						face = 4;
 					}
+					else if (j > 2 * edge) { // If we're below the middle of the strip, bottom face
+						face = 5;
+					}
+					else {
+						face = int(i / edge); // In the middle of the strip, determine by ratio what face we have
+					}
+
+					// Covert T-Strip coordinates to unit-cube coordinates
+					double x, y, z;
+					ImgToXYZ(i, j, face, edge, &x, &y, &z);
+
+					double theta = std::atan2(y, x);
+					double r = std::hypot(x, y);
+					double phi = std::atan2(z, r);
+					double uf = (theta + M_PI) / M_PI * height;
+					double vf = (M_PI_2 - phi) / M_PI * height;
+					/*
+						Coordinate structure:
+						[     ][     ][     ][u3/v4]
+						[     ][     ][u2/v2][     ]
+						[     ][ui/vi][     ][     ]
+						[u4/v4][     ][     ][     ]
+					*/
+					int ui = std::min(static_cast<int>(std::floor(uf)), width);
+					int vi = std::min(static_cast<int>(std::floor(vf)), height);
+					int u2 = std::min(ui + 1, width);
+					int v2 = std::min(vi + 1, height);
+					int u3 = std::min(ui + 2, width);
+					int v3 = std::min(vi + 2, height);
+					int u4 = std::max(ui - 1, 0);
+					int v4 = std::max(vi - 1, 0);
+					int u[4] = { ui, u2, u3, u4 };
+					int v[4] = { vi, v2, v3, v4 };
+
+					unsigned char Rval[16];
+					unsigned char Gval[16];
+					unsigned char Bval[16];
+
+					// This can cause out of bounds errors for I-Have-No-Idea-Why.  It's the EXACT same lookup math used by CImg and doesn't cause issues with Bilinear filtering, but the exact same points will cause OOB with trilinear
+					// I just don't know.  Whatever.  Skip OOB pixels, the others will make up for it.
+					for (int a = 0; a < 4; a++) {
+						for (int b = 0; b < 4; b++) {
+							if (u[a] + v[b] * width + 2 * width*height > width*height * 3)
+								continue;
+
+							Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
+							Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
+							Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+						}
+					}
+
+					float weight[3] = { 0.5f, 0.5f, 0.5f };
+					unsigned char R = Linear(weight[0], Trilinear(weight, &Rval[0]), Trilinear(weight, &Rval[8]));
+					unsigned char G = Linear(weight[0], Trilinear(weight, &Gval[0]), Trilinear(weight, &Gval[8]));
+					unsigned char B = Linear(weight[0], Trilinear(weight, &Bval[0]), Trilinear(weight, &Bval[8]));
+
+					// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
+					int idx = ((i%edge) + (j%edge)*edge);
+					// CImg uses planar RGBA storage, hence n*edge*edge for each value
+					imgOut[face][idx + 0 * edge*edge] = R;
+					imgOut[face][idx + 1 * edge*edge] = G;
+					imgOut[face][idx + 2 * edge*edge] = B;
+					imgOut[face][idx + 3 * edge*edge] = 255;
 				}
-
-				float weight[3] = { 0.5f, 0.5f, 0.5f };
-				unsigned char R = Linear(weight[0], Trilinear(weight, &Rval[0]), Trilinear(weight, &Rval[8]));
-				unsigned char G = Linear(weight[0], Trilinear(weight, &Gval[0]), Trilinear(weight, &Gval[8]));
-				unsigned char B = Linear(weight[0], Trilinear(weight, &Bval[0]), Trilinear(weight, &Bval[8]));
-
-				// Based on T-Strip coordinates, mod to edge size and insert into appropriate face
-				int idx = ((i%edge) + (j%edge)*edge);
-				// CImg uses planar RGBA storage, hence n*edge*edge for each value
-				imgOut[face][idx + 0 * edge*edge] = R;
-				imgOut[face][idx + 1 * edge*edge] = G;
-				imgOut[face][idx + 2 * edge*edge] = B;
-				imgOut[face][idx + 3 * edge*edge] = 255;
 			}
-		}
+#ifdef _WIN32
+		}, maxthreads);
+#endif
+	}
 #ifdef __linux__
 	});
+#endif
+	// macros, macros everywhere
+#ifdef _WIN32
+	for (int i = 0; i < maxthreads; i++) {
+		threads[i].join();
+	}
+	delete[]threads;
 #endif
 }
 
@@ -544,27 +567,39 @@ int main(int argc, char *argv[])
 {
 	parseParameters(argc, argv);
 	printf("Converting [%s] to faces [%s] with size [%d]...\n", ivalue, ovalue, edge);
+
+	// Load input Image
 	CImg<unsigned char> ImgIn(ivalue);
 	printf("%d\n", ImgIn.size());
-	// Create output images
+
+	// Create output Images
 	CImg<unsigned char>* CImgOut[6];
 	unsigned char* imgOut[6];
 	for (int i = 0; i < 6; ++i) {
 		CImgOut[i] = new CImg<unsigned char>(edge, edge, 1, 4, 255);
 		imgOut[i] = (unsigned char*)CImgOut[i]->data();
 	}
+
+	// Start timer
 	std::chrono::high_resolution_clock::time_point total = std::chrono::high_resolution_clock::now();
 #ifdef _WIN32
 	if (cflag) {
 		printf("Using CUDA for processing\n");
+
+		// Store these values on the stack
 		int InSize = ImgIn.size();
 		int width = ImgIn.width();
 		int height = ImgIn.height();
+
+		// Allocate space on the device for the equirectangular image
 		unsigned char *d_ImgIn;
 		HANDLE_ERROR(cudaMallocManaged((void**)&d_ImgIn, InSize * sizeof(unsigned char)));
 		std::memcpy(d_ImgIn, ImgIn.data(), InSize * sizeof(unsigned char));
+
+		// Clear the input image from host memory, we never use it CPU side again
 		ImgIn.clear();
 
+		// Check memory availability
 		size_t total_memory, free_memory;
 		HANDLE_ERROR(cudaMemGetInfo(&free_memory, &total_memory) );
 		printf("Total Memory: %lld\n Free Memory: %lld\n", total_memory, free_memory);
@@ -577,17 +612,24 @@ int main(int argc, char *argv[])
 			return -1;
 		}
 
+		// See if we can fit all 6 cubeface output images into device memory at once, if not render them sequentially
 		if (outSize * 6 > free_memory) {
 			std::thread threads[6];
 			fprintf(stderr, "Not enough memory on device to run all faces in parallel, running one face at a time\n");
 			unsigned char *d_ImgOut, *h_ImgOut;
 
+			// Malloc a single ImgOut on the device to be reused for each face
 			HANDLE_ERROR(cudaMalloc((void**)&d_ImgOut, outSize * sizeof(unsigned char)));
+			// cudaMallocHost allocates non-paging CPU-side memory and greatly speeds up memcpy operations
 			HANDLE_ERROR(cudaMallocHost((void**)&h_ImgOut, outSize * sizeof(unsigned char)));
 			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+
+			// Block sizes should be in multiples of warps (32)
 			int blockSize = 256;
+			// Calculate number of blocks to give us maximal parallelization
 			int blockCount = (edge + blockSize - 1) / blockSize;
 			printf("Total threads: %d\n", blockSize * blockCount);
+
 			for (int i = 0; i < 6; i++) {
 				fprintf(stderr, "Starting face %d...\n", i);
 				ConvertFace <<<blockCount, blockSize >>> (d_ImgIn, d_ImgOut, i, width, height, edge);
@@ -595,6 +637,8 @@ int main(int argc, char *argv[])
 				HANDLE_ERROR(cudaThreadSynchronize());
 				HANDLE_ERROR(cudaMemcpy(h_ImgOut, d_ImgOut, outSize * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 				std::memcpy(imgOut[i], h_ImgOut, outSize * sizeof(unsigned char));
+
+				// Image data now lives CPU-side, immediately start a thread to begin writing it to disk while we process the others
 				threads[i] = std::thread([&, i]() {
 					std::string fname = std::string(ovalue) + "_" + std::to_string(i) + ".png";
 					CImgOut[i]->save_png(fname.c_str());
@@ -602,9 +646,11 @@ int main(int argc, char *argv[])
 					printf("Thread %d finished writing to disk\n", i);
 				});
 			}
+			// Free everything we don't use anymore
 			HANDLE_ERROR(cudaFree(d_ImgIn));
 			HANDLE_ERROR(cudaFree(d_ImgOut));
 			HANDLE_ERROR(cudaFreeHost(h_ImgOut));
+
 			fprintf(stderr, "Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t1).count());
 			for (int i = 0; i < 6; i++) {
 				threads[i].join();
@@ -623,19 +669,23 @@ int main(int argc, char *argv[])
 			}
 
 			std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+
 			int blockSize = 256;
 			int blockCount = (width + blockSize - 1) / blockSize;
 			fprintf(stderr, "Starting conversion...\n");
+
 			ConvertBack <<<blockCount, blockSize >>> (d_ImgIn, d_Faces, width, height, edge);
 			HANDLE_ERROR(cudaDeviceSynchronize());
 			HANDLE_ERROR(cudaThreadSynchronize());
 			HANDLE_ERROR(cudaFree(d_ImgIn));
+
 			fprintf(stderr, "Time to convert: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t1).count());
 			fprintf(stderr, "Device Synchronized\n");
 
 
 			std::thread threads[6];
 			for (int i = 0; i < 6; i++) {
+				// Copy image data to host memory, then free it from the device
 				std::memcpy(imgOut[i], d_Faces[i], outSize * sizeof(unsigned char));
 				HANDLE_ERROR(cudaFree(d_Faces[i]));
 				threads[i] = std::thread([&, i]() {
@@ -657,6 +707,8 @@ int main(int argc, char *argv[])
 	else {
 #endif
 		printf("Using CPU for Processing\n");
+		// Note: With TBB it's faster to process the entire T-Strip at once because we may have more than 6 available threads
+		// If we do, then doing each face iteratively and threading the save routine (the slow part) will end up being much slower than threading all 6 save calls at once
 		ConvertCPU(ImgIn.data(), imgOut, ImgIn.width(), ImgIn.height());
 		std::thread threads[6];
 		for (int i = 0; i < 6; i++) {
