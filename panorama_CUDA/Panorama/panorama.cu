@@ -392,6 +392,7 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 		for (size_t i = range.begin(); i < range.end(); i++) {
 #endif
 #ifdef _WIN32
+	printf("TBB is not yet implemented for Windows, it is recommended you run this on a Linux instance with TBB installed or on a CUDA compatible Windows system.\n");
 	for (int i = 0; i < TotalWidth; i++) {
 #endif
 			int face = int(i / edge);
@@ -514,6 +515,7 @@ int parseParameters(int argc, char *argv[]) {
 			edge = std::stoi(optarg);
 			break;
 		case 'c':
+			printf("-c flag detected.  CUDA is not yet implemented for Linux systems, processing will take place on CPU instead\n");
 			cflag = 1;
 			break;
 		case '?':
@@ -552,6 +554,7 @@ int main(int argc, char *argv[])
 		imgOut[i] = (unsigned char*)CImgOut[i]->data();
 	}
 	std::chrono::high_resolution_clock::time_point total = std::chrono::high_resolution_clock::now();
+#ifdef _WIN32
 	if (cflag) {
 		printf("Using CUDA for processing\n");
 		int InSize = ImgIn.size();
@@ -652,6 +655,7 @@ int main(int argc, char *argv[])
 		}
 	}
 	else {
+#endif
 		printf("Using CPU for Processing\n");
 		ConvertCPU(ImgIn.data(), imgOut, ImgIn.width(), ImgIn.height());
 		std::thread threads[6];
@@ -668,7 +672,9 @@ int main(int argc, char *argv[])
 			threads[i].join();
 		}
 		fprintf(stderr, "Total Time To Convert And Write: %lldms\n", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - total).count());
+#ifdef _WIN32
 	}
+#endif
 
 	return 0;
 }
