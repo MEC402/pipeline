@@ -1,4 +1,5 @@
 #define _USE_MATH_DEFINES
+#define GLM_ENABLE_EXPERIMENTAL
 
 #include <iostream>
 #include <math.h>
@@ -6,7 +7,9 @@
 #include <string>
 #include <chrono>
 #include <thread>
-
+#include <glm/glm.hpp>
+#include <glm/gtx/transform.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 
 #ifdef _WIN32
 #include "cuda.h"
@@ -28,9 +31,10 @@
 using namespace cimg_library;
 
 // Input parameters
-int iflag, oflag, hflag, rflag, cflag;
+int iflag, oflag, hflag, rflag, tflag, cflag;
 char *ivalue, *ovalue;
 int edge = 512;
+double yaw = 0.0, pitch = 0.0, roll = 0.0;
 
 #ifdef _WIN32
 #pragma region CUDACALLS
@@ -113,7 +117,7 @@ inline unsigned char TrilinearInterpolate(float *weight, unsigned char *values)
 		BilinearInterpolate(&(weight[0]), &(values[0])),
 		BilinearInterpolate(&(weight[1]), &(values[4]))
 	};
-	return LinearInterpolate(weight[3], prime);
+	return LinearInterpolate(weight[2], prime);
 }
 
 // Convert the entire cubemap at once
@@ -343,9 +347,8 @@ unsigned char Trilinear(float *weight, unsigned char *values)
 		Bilinear(&(weight[0]), &(values[0])),
 		Bilinear(&(weight[1]), &(values[4]))
 	};
-	return Linear(weight[3], prime);
+	return Linear(weight[2], prime);
 }
-
 
 void ImgToXYZ(int i, int j, int face, int edge, double *x, double *y, double *z) {
 	auto a = 2.0 * i / edge;
@@ -434,12 +437,13 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 						[     ][ui/vi][     ][     ]
 						[u4/v4][     ][     ][     ]
 					*/
-					int ui = std::min(static_cast<int>(std::floor(uf)), width);
-					int vi = std::min(static_cast<int>(std::floor(vf)), height);
-					int u2 = std::min(ui + 1, width);
-					int v2 = std::min(vi + 1, height);
-					int u3 = std::min(ui + 2, width);
-					int v3 = std::min(vi + 2, height);
+					// Width/Height - 1 max to prevent OOB errors
+					int ui = std::min(static_cast<int>(std::floor(uf)), width-1);
+					int vi = std::min(static_cast<int>(std::floor(vf)), height-1);
+					int u2 = std::min(ui + 1, width-1);
+					int v2 = std::min(vi + 1, height-1);
+					int u3 = std::min(ui + 2, width-1);
+					int v3 = std::min(vi + 2, height-1);
 					int u4 = std::max(ui - 1, 0);
 					int v4 = std::max(vi - 1, 0);
 					int u[4] = { ui, u2, u3, u4 };
@@ -449,13 +453,8 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 					unsigned char Gval[16];
 					unsigned char Bval[16];
 
-					// This can cause out of bounds errors for I-Have-No-Idea-Why.  It's the EXACT same lookup math used by CImg and doesn't cause issues with Bilinear filtering, but the exact same points will cause OOB with trilinear
-					// I just don't know.  Whatever.  Skip OOB pixels, the others will make up for it.
 					for (int a = 0; a < 4; a++) {
 						for (int b = 0; b < 4; b++) {
-							if (u[a] + v[b] * width + 2 * width*height > width*height * 3)
-								continue;
-
 							Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
 							Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
 							Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
@@ -492,6 +491,79 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 #endif
 }
 
+// Transform equirectangular panorama to new one
+void TransformCPU(unsigned char *imgIn, unsigned char *imgOut, int width, int height, double yaw, double pitch, double roll)
+{
+	int threadCount = std::thread::hardware_concurrency();
+	std::thread *threads = new std::thread[threadCount];
+	for (int n = 0; n < threadCount; n++) {
+		threads[n] = std::thread([&, n]() {
+			for (int x = n; x < width; x += threadCount) {
+				for (int y = 0; y < height; y++) {
+					double xx = 2.0 * (x + 0.5) / width - 1.0;
+					double yy = 2.0 * (y + 0.5) / height - 1.0;
+					double lng = M_PI * xx;
+					double lat = M_PI_2 * yy;
+					double X, Y, Z, D;
+					int ix, iy;
+
+					X = cos(lat) * cos(lng);
+					Y = cos(lat) * sin(lng);
+					Z = sin(lat);
+					D = sqrt(X * X + Y * Y);
+
+					glm::mat4 rotation = glm::rotate(glm::mat4(1), glm::radians((float)yaw), glm::vec3(0.0, 0.0, 1.0))
+						* glm::rotate(glm::mat4(1), glm::radians((float)pitch), glm::vec3(0.0, 1.0, 0.0))
+						* glm::rotate(glm::mat4(1), glm::radians((float)roll), glm::vec3(1.0, 0.0, 0.0));
+					glm::vec3 outXYZ = glm::vec3(rotation * glm::vec4(X, Y, Z, 1.0));
+					X = outXYZ.x;
+					Y = outXYZ.y;
+					Z = outXYZ.z;
+
+					lat = atan2(Z, D);
+					lng = atan2(Y, X);
+
+					ix = (0.5 * lng / M_PI + 0.5) * width - 0.5;
+					iy = (lat / M_PI + 0.5) * height - 0.5;
+
+					int ui = std::min(ix, width - 1);
+					int vi = std::min(iy, height - 1);
+					int u2 = std::min(ui + 1, width - 1);
+					int v2 = std::min(vi + 1, height - 1);
+					int u3 = std::min(ui + 2, width - 1);
+					int v3 = std::min(vi + 2, height - 1);
+					int u4 = std::max(ui - 1, 0);
+					int v4 = std::max(vi - 1, 0);
+					int u[4] = { ui, u2, u3, u4 };
+					int v[4] = { vi, v2, v3, v4 };
+
+					unsigned char Rval[16];
+					unsigned char Gval[16];
+					unsigned char Bval[16];
+					for (int a = 0; a < 4; a++) {
+						for (int b = 0; b < 4; b++) {
+							Rval[a * 4 + b] = imgIn[u[a] + v[b] * width + 0 * width*height];
+							Gval[a * 4 + b] = imgIn[u[a] + v[b] * width + 1 * width*height];
+							Bval[a * 4 + b] = imgIn[u[a] + v[b] * width + 2 * width*height];
+						}
+					}
+
+					float weight[3] = { 0.5f, 0.5f, 0.5f };
+					unsigned char R = Linear(weight[0], Trilinear(weight, &Rval[0]), Trilinear(weight, &Rval[8]));
+					unsigned char G = Linear(weight[0], Trilinear(weight, &Gval[0]), Trilinear(weight, &Gval[8]));
+					unsigned char B = Linear(weight[0], Trilinear(weight, &Bval[0]), Trilinear(weight, &Bval[8]));
+					imgOut[x + y * width + 0 * width*height] = R;
+					imgOut[x + y * width + 1 * width*height] = G;
+					imgOut[x + y * width + 2 * width*height] = B;
+				}
+			}
+		});
+	}
+	for (int n = 0; n < threadCount; n++) {
+		threads[n].join();
+	}
+	delete[]threads;
+}
 
 int parseParameters(int argc, char *argv[]) {
 	iflag = oflag = hflag = rflag = cflag = 0;
@@ -515,8 +587,14 @@ int parseParameters(int argc, char *argv[]) {
 		if (argv[i] == std::string("-c")) {
 			cflag = 1;
 		}
+		if (argv[i] == std::string("-t")) {
+			tflag = 1;
+			yaw = std::stod(argv[++i]);
+			pitch = std::stod(argv[++i]);
+			roll = std::stod(argv[++i]);
+		}
 		if (argv[i] == std::string("-h")) {
-			fprintf(stderr, "Usage:\n\t -i <input file>\n\t -o <output file(s)>\n\t -r <edge size>\n\t -c (enable CUDA)\n");
+			fprintf(stderr, "Usage:\n\t -i <input file>\n\t -o <output file(s)>\n\t -r <edge size>\n-t <yaw> <pitch> <roll>\n\t -c (enable CUDA)\n");
 			abort();
 		}
 	}
@@ -571,6 +649,13 @@ int main(int argc, char *argv[])
 	// Load input Image
 	CImg<unsigned char> ImgIn(ivalue);
 	printf("%d\n", ImgIn.size());
+
+	if (tflag) {
+		CImg<unsigned char> CImgOut(ImgIn.width(), ImgIn.height(), 1, 3, 255);
+		TransformCPU(ImgIn.data(), CImgOut.data(), ImgIn.width(), ImgIn.height(), yaw, pitch, roll);
+		CImgOut.save_png("Out.png");
+		return 0;
+	}
 
 	// Create output Images
 	CImg<unsigned char>* CImgOut[6];
