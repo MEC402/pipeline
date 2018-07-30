@@ -491,7 +491,35 @@ void ConvertCPU(unsigned char *imgIn, unsigned char **imgOut, int width, int hei
 #endif
 }
 
+glm::vec3 PRotateX(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x;
+	q.y = p.y * cos(theta) + p.z * sin(theta);
+	q.z = -p.y * sin(theta) + p.z * cos(theta);
+	return(q);
+}
+
+glm::vec3 PRotateY(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x * cos(theta) - p.z * sin(theta);
+	q.y = p.y;
+	q.z = p.x * sin(theta) + p.z * cos(theta);
+	return(q);
+}
+
+glm::vec3 PRotateZ(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x * cos(theta) + p.y * sin(theta);
+	q.y = -p.x * sin(theta) + p.y * cos(theta);
+	q.z = p.z;
+	return(q);
+}
+
 // Transform equirectangular panorama to new one
+// TODO: This comes out super blurry, and only behaves when rotating Yaw, pitch/roll yield horribly distorted and pinched images
 void TransformCPU(unsigned char *imgIn, unsigned char *imgOut, int width, int height, double yaw, double pitch, double roll)
 {
 	int threadCount = std::thread::hardware_concurrency();
@@ -500,6 +528,8 @@ void TransformCPU(unsigned char *imgIn, unsigned char *imgOut, int width, int he
 		threads[n] = std::thread([&, n]() {
 			for (int x = n; x < width; x += threadCount) {
 				for (int y = 0; y < height; y++) {
+
+					// Scale x/y to Lat/Long in radians
 					double xx = 2.0 * (x + 0.5) / width - 1.0;
 					double yy = 2.0 * (y + 0.5) / height - 1.0;
 					double lng = M_PI * xx;
@@ -507,25 +537,26 @@ void TransformCPU(unsigned char *imgIn, unsigned char *imgOut, int width, int he
 					double X, Y, Z, D;
 					int ix, iy;
 
-					X = cos(lat) * cos(lng);
-					Y = cos(lat) * sin(lng);
-					Z = sin(lat);
+					// Covnert initial Lat/Long to cartesian XYZ coordinates
+					X = cos(lat) * sin(lng); 
+					Y = sin(lat);
+					Z = cos(lat) * cos(lng);
 					D = sqrt(X * X + Y * Y);
 
-					glm::mat4 rotation = glm::rotate(glm::mat4(1), glm::radians((float)yaw), glm::vec3(0.0, 0.0, 1.0))
-						* glm::rotate(glm::mat4(1), glm::radians((float)pitch), glm::vec3(0.0, 1.0, 0.0))
-						* glm::rotate(glm::mat4(1), glm::radians((float)roll), glm::vec3(1.0, 0.0, 0.0));
-					glm::vec3 outXYZ = glm::vec3(rotation * glm::vec4(X, Y, Z, 1.0));
-					X = outXYZ.x;
-					Y = outXYZ.y;
-					Z = outXYZ.z;
+					glm::vec3 ray(X, Y, Z);
+					ray = PRotateX(ray, glm::radians(yaw));
+					ray = PRotateY(ray, glm::radians(pitch));
+					ray = PRotateZ(ray, glm::radians(roll));
 
-					lat = atan2(Z, D);
-					lng = atan2(Y, X);
+					lat = asin(ray.y);
+					lng = atan2(ray.x, ray.z);
 
+					// Get relative x/y coordinates on the original equirectangular
+					// This undoes the radian scaling performed originall
 					ix = (0.5 * lng / M_PI + 0.5) * width - 0.5;
 					iy = (lat / M_PI + 0.5) * height - 0.5;
 
+					// Supersample 4x4 pixel block around coordinate
 					int ui = std::min(ix, width - 1);
 					int vi = std::min(iy, height - 1);
 					int u2 = std::min(ui + 1, width - 1);
@@ -644,19 +675,25 @@ int parseParameters(int argc, char *argv[]) {
 int main(int argc, char *argv[])
 {
 	parseParameters(argc, argv);
-	printf("Converting [%s] to faces [%s] with size [%d]...\n", ivalue, ovalue, edge);
-
+	
 	// Load input Image
 	CImg<unsigned char> ImgIn(ivalue);
-	printf("%d\n", ImgIn.size());
 
 	if (tflag) {
+		printf("Transforming [%s] with Yaw [%f] Pitch [%f] and Roll [%f]...\n", ivalue, yaw, pitch, roll);
 		CImg<unsigned char> CImgOut(ImgIn.width(), ImgIn.height(), 1, 3, 255);
 		TransformCPU(ImgIn.data(), CImgOut.data(), ImgIn.width(), ImgIn.height(), yaw, pitch, roll);
-		CImgOut.save_png("Out.png");
+		std::string fname = std::string(ovalue) + "_Transformed.png";
+		//printf("Resizing first pass...\n");
+		//CImgOut.resize_halfXY();
+		//printf("Resizing second pass...\n");
+		//CImgOut.resize_halfXY();
+		printf("Saving new Equirectangular Image (This could take a minute)...\n");
+		CImgOut.save_png(fname.c_str());
 		return 0;
 	}
 
+	printf("Converting [%s] to faces [%s] with size [%d]...\n", ivalue, ovalue, edge);
 	// Create output Images
 	CImg<unsigned char>* CImgOut[6];
 	unsigned char* imgOut[6];
