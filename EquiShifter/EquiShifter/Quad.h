@@ -2,6 +2,8 @@
 #define __QUAD_H
 
 #include <GL\glew.h>
+//Use the "short" extension for TIF to not confuse with TIFF.h types
+enum IMGenum { PNG = 0, JPG, TIF };
 
 const float quadVertices[18] = {
 	// Triangle 1
@@ -29,15 +31,18 @@ struct Texture {
 	unsigned char *data = NULL;
 	int width;
 	int height;
+	int channels;
 };
 
 struct Quad {
 	GLuint posBuf;
 	GLuint txBuf;
+	IMGenum type;
 	int indices;
 	float yaw{ 0.0f };
 	float pitch{ 0.0f };
 	float roll{ 0.0f };
+	float alpha{ 1.0f };
 	Texture texture;
 };
 

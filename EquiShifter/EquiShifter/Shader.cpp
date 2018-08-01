@@ -49,10 +49,8 @@ void Shader::BindTexture(GLuint txID)
 	}
 }
 
-void Shader::CreateTexture(int width, int height, unsigned char *data, Quad *q)
+void Shader::CreateTexture(Quad *q)
 {
-	q->texture.width = width;
-	q->texture.height = height;
 	glGenTextures(1, &q->texture.id);
 	glBindTexture(GL_TEXTURE_2D, q->texture.id);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -60,7 +58,7 @@ void Shader::CreateTexture(int width, int height, unsigned char *data, Quad *q)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, q->texture.width, q->texture.height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, q->texture.width, q->texture.height, 0, GL_RGB, GL_UNSIGNED_BYTE, q->texture.data);
 }
 
 /* --------------- Begin Private Functions --------------- */

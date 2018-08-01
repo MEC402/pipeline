@@ -1,3 +1,33 @@
+#ifndef __FILTERS_H
+#define __FILTERS_H
+
+#include <glm/glm.hpp>
+inline glm::vec3 rotateX(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x;
+	q.y = p.y * cos(theta) + p.z * sin(theta);
+	q.z = -p.y * sin(theta) + p.z * cos(theta);
+	return q;
+}
+
+inline glm::vec3 rotateY(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x * cos(theta) - p.z * sin(theta);
+	q.y = p.y;
+	q.z = p.x * sin(theta) + p.z * cos(theta);
+	return q;
+}
+
+inline glm::vec3 rotateZ(glm::vec3 p, float theta)
+{
+	glm::vec3 q;
+	q.x = p.x * cos(theta) + p.y * sin(theta);
+	q.y = -p.x * sin(theta) + p.y * cos(theta);
+	q.z = p.z;
+	return q;
+}
 
 // Overload for nesting Interpolate calls
 inline unsigned char Linear(float weight, unsigned char v1, unsigned char v2)
@@ -35,3 +65,5 @@ inline unsigned char Trilinear(float *weight, unsigned char *values)
 	unsigned char result = Linear(weight[2], prime);
 	return result;
 }
+
+#endif //__FILTERS_H

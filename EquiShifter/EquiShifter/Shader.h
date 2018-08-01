@@ -15,7 +15,7 @@ public:
 	void SetMVP(glm::mat4 MVP);
 	void SetUniform(float value, const char *uniformName);
 	void BindTexture(GLuint txID);
-	void CreateTexture(int width, int height, unsigned char *data, Quad *q);
+	void CreateTexture(Quad *q);
 
 private:
 

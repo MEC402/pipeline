@@ -2,6 +2,7 @@
 #define __CAMERA_H
 
 #include <glm\gtc\matrix_transform.hpp>
+#include "Quad.h"
 
 class Camera {
 public:

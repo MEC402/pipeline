@@ -24,14 +24,13 @@ void main()
 const GLchar *fragSource = R"END(
 #version 330 core
 uniform sampler2D image;
-//uniform int width;
-//uniform int height;
+
+uniform float alpha;
 uniform float yaw;
 uniform float pitch;
 uniform float roll;
 
 in vec2 f_txCoord;
-in vec3 f_rotations;
 out vec4 outColor;
 
 vec3 rotateX(vec3 p, float theta)
@@ -83,7 +82,8 @@ void main()
 	txCoords.x = (lng + PI)/(2.0*PI);
 	txCoords.y = (lat + PI/2.0)/PI;
 
-	outColor = texture(image, txCoords).rgba;
+
+	outColor = vec4(texture(image, txCoords).rgb, alpha);
 }
 )END";
 
