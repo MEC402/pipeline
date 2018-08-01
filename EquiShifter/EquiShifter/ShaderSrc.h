@@ -1,3 +1,7 @@
+/*
+	GLSL source, eliminates the need to ship with separate shader files
+*/
+
 #ifndef __SHADERSRC_H
 #define __SHADERSRC_H
 

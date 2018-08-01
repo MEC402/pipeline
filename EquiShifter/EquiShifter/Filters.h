@@ -1,3 +1,7 @@
+/*
+	Helper header for interpolation functions and vector rotation functions
+*/
+
 #ifndef __FILTERS_H
 #define __FILTERS_H
 

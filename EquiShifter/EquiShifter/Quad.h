@@ -2,7 +2,6 @@
 #define __QUAD_H
 
 #include <GL\glew.h>
-//Use the "short" extension for TIF to not confuse with TIFF.h types
 enum IMGenum { PNG = 0, JPG, TIF };
 
 const float quadVertices[18] = {

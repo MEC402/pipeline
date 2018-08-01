@@ -1,3 +1,9 @@
+/*
+	This header deals with determining image filetype, reading the image, and saving the new transformed equirectanuglar.
+	libpng and libtiff calls are made directly in lieu of a pre-existing image library as STBI yields huge files and everything else is overkill.
+	Author: Michael Burke, Boise State University, 2018
+*/
+
 #ifndef __IMAGEHANDLER_H
 #define __IMAGEHANDLER_H
 
@@ -43,7 +49,7 @@ IMGenum SetImagetype(std::string filepath)
 	std::locale loc;
 	std::string extension = filepath.substr(filepath.find_last_of('.'));
 	// STL C++ doesn't have a "string.tolower()" function.
-	// You have go to be kidding me.
+	// You have got to be kidding me.
 	for (int i = 0; i < extension.length(); i++)
 		extension[i] = std::tolower(extension[i], loc);
 
@@ -253,6 +259,8 @@ void TransformData(Quad img, unsigned char **imgOut)
 			for (int y = n, yFlip = height - 1 - n; y < height; y += threadCount, yFlip -= threadCount) {
 				unsigned char *outPtr = imgOut[y];
 				for (int x = 0; x < width; x++) {
+
+					// Get 2x2 grid of pixels to sample from
 					int xFilter[2] = { std::min(x, width - 1), std::min(x + 1, width - 1) };
 					int yFilter[2] = { std::min(yFlip, height - 1), std::min(yFlip + 1, height - 1) };
 					unsigned char Rval[4];
