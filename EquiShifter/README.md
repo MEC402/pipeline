@@ -4,15 +4,16 @@ Tool for transforming existing spherical equirectangular images and rotating or 
 Useful for panoramas that are not aligned stereoscopically or otherwise need warping.
 
 ## Dependencies (Windows)
-- Freeglut
-- Glew32
+- Freeglut (64bit DLL and Lib)
+- Glew32 (64bit DLL and Lib)
 - GLM (0.9.9 used at the time of writing)
 - libpng (NuGet installation recommended)
-- Visual Studio 2015 (v140) Toolkit
-- stb_image and stb_image_write, or replace the two calls (load/save) with your preferred image library
+- libtiff (NuGet installation recommended)
+- Visual Studio 2015 (v140) Toolkit (Required for libpng/libtiff compatibility)
 
 ## Usage
 w/a/s/d/q/e will warp the panorama, scrollwheel zooms in/out, arrow keys move the panorama around the screen.
 
-## TODO:
-Save button.
+F5 will save the panorama as it appears on the screen.
+
+This program does not copy anything out of the framebuffer, the viewscreen is rendered by fragment shader manipulations and all image data is retained in CPU-side memory throughout.  The warping math is repeated CPU-side when saving, preventing any expensive calls to pull information out of the GPU.
