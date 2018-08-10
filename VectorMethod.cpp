@@ -96,15 +96,34 @@ void alignImages(Mat &im1, Mat &im2, Mat &im1Reg, Mat &h, std::string &leftName,
 	vector<Point> leftPoints, rightPoints;
 	for (int i = 0; i < 10; i++) {
 		for (int j = 0; j < 10; j++) {
+			double Ldistance, Rdistance;
+			Ldistance = sqrt(pow((LeftGoodKeypoints[j].pt.x - LeftGoodKeypoints[i].pt.x), 2)
+				+ pow((LeftGoodKeypoints[j].pt.y - LeftGoodKeypoints[i].pt.y), 2));
+			Rdistance = sqrt(pow((RightGoodKeypoints[j].pt.x - RightGoodKeypoints[i].pt.x), 2)
+				+ pow((RightGoodKeypoints[j].pt.y - RightGoodKeypoints[i].pt.y), 2));
 			vector<float> tmpL;
-			tmpL.push_back(LeftGoodKeypoints[j].pt.x - LeftGoodKeypoints[i].pt.x);
-			tmpL.push_back(LeftGoodKeypoints[j].pt.y - LeftGoodKeypoints[i].pt.y);
-			LeftVectors[i][j] = tmpL;
-
+			if (Ldistance <= std::abs(double(im1.size().width) - Ldistance)) {
+				tmpL.push_back(LeftGoodKeypoints[j].pt.x - LeftGoodKeypoints[i].pt.x);
+				tmpL.push_back(LeftGoodKeypoints[j].pt.y - LeftGoodKeypoints[i].pt.y);
+				LeftVectors[i][j] = tmpL;
+			}
+			else if (Ldistance > std::abs(double(im1.size().width) - Ldistance)) {
+				tmpL.push_back(float(im1.size().width) - abs(LeftGoodKeypoints[j].pt.x - LeftGoodKeypoints[i].pt.x));
+				tmpL.push_back(LeftGoodKeypoints[j].pt.y - LeftGoodKeypoints[i].pt.y);
+				LeftVectors[i][j] = tmpL;
+			}
 			vector<float> tmpR;
+			if (Rdistance <= std::abs(double(im1.size().width) - Rdistance)) {
 			tmpR.push_back(RightGoodKeypoints[j].pt.x - RightGoodKeypoints[i].pt.x);
 			tmpR.push_back(RightGoodKeypoints[j].pt.y - RightGoodKeypoints[i].pt.y);
 			RightVectors[i][j] = tmpR;
+			}
+			else if (Rdistance > std::abs(double(im1.size().width) - Rdistance)) {
+				tmpR.push_back(float(im2.size().width)-abs(RightGoodKeypoints[j].pt.x - RightGoodKeypoints[i].pt.x));
+				tmpR.push_back(RightGoodKeypoints[j].pt.y - RightGoodKeypoints[i].pt.y);
+				RightVectors[i][j] = tmpR;
+			}
+			
 
 			vector<float> tmpE;
 			tmpE.push_back(tmpR[0]-tmpL[0]);
@@ -206,7 +225,7 @@ int main(int argc, char **argv)
 
 	// Align images
 	cout << "Aligning images ..." << endl;
-	alignImages(im, imReference, imReg, h, refFilename, imFilename);
+	alignImages(imReference, im, imReg, h, refFilename, imFilename);
 
 
 

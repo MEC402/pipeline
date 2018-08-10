@@ -208,7 +208,7 @@ int main(int argc, char **argv)
 
 	// Align images
 	cout << "Aligning images ..." << endl;
-	alignImages(im, imReference, imReg, h, refFilename, imFilename);
+	alignImages(imReference, im, imReg, h, refFilename, imFilename);
 
 
 
